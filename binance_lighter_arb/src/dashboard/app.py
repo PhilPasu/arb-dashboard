@@ -151,7 +151,7 @@ class DataCollector(threading.Thread):
 # ==============================================================================
 @st.cache_resource
 def start_data_collector():
-    collector = DataCollector(interval=5.0) # Fetch every 5s to avoid rate limits
+    collector = DataCollector(interval=1.0) # Aggressive fetch
     collector.start()
     return collector
 
@@ -195,7 +195,7 @@ def main():
     base_exchange = "Lighter" # Always compare against Lighter
     
     lookback = st.sidebar.slider("History Window (Minutes)", 5, 10080, 60)
-    auto_refresh = st.sidebar.checkbox("Auto-Refresh (2s)", value=True)
+    auto_refresh = st.sidebar.checkbox("Auto-Refresh (Fast)", value=True)
 
     # Main Content
     data = load_data(selected_coin, lookback)
@@ -248,7 +248,7 @@ def main():
 
     # Auto-rerun
     if auto_refresh:
-        time.sleep(2)
+        time.sleep(0.5)
         st.rerun()
 
 if __name__ == "__main__":
