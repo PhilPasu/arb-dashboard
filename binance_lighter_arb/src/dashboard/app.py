@@ -166,6 +166,7 @@ def load_data(coin, lookback_minutes=60):
         df = pd.read_csv(fname)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df.set_index('timestamp', inplace=True)
+        df.sort_index(inplace=True) # Ensure monotonic index for rolling
         
         # Filter lookback
         cutoff = datetime.now() - pd.Timedelta(minutes=lookback_minutes)
@@ -232,10 +233,22 @@ def main():
         # Calculate Spread Series
         s_series = (data[target_exchange.lower()] - data[base_exchange.lower()]) / data[target_exchange.lower()] * 10000
         
+        # Calculate Percentiles (Whole Period)
+        qt_90 = s_series.quantile(0.90)
+        qt_50 = s_series.quantile(0.50)
+        qt_10 = s_series.quantile(0.10)
+
         fig_spread = go.Figure()
         fig_spread.add_trace(go.Scatter(x=data.index, y=s_series, name="Spread (bps)", line=dict(color='green', width=1)))
-        fig_spread.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig_spread.update_layout(title="Relative Spread (bps)", height=250, margin=dict(l=0,r=0,t=30,b=0))
+        
+        # Add Benchmark Lines
+        fig_spread.add_hline(y=0, line_dash="solid", line_color="black", opacity=0.3)
+        
+        fig_spread.add_hline(y=qt_90, line_dash="dot", line_color="orange", annotation_text=f"90%: {qt_90:.1f}", annotation_position="top left")
+        fig_spread.add_hline(y=qt_50, line_dash="dash", line_color="blue", annotation_text=f"Median: {qt_50:.1f}", annotation_position="top left")
+        fig_spread.add_hline(y=qt_10, line_dash="dot", line_color="orange", annotation_text=f"10%: {qt_10:.1f}", annotation_position="bottom left")
+
+        fig_spread.update_layout(title="Relative Spread (bps) with Percentile Bands", height=250, margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig_spread, use_container_width=True)
         
         # 3. Avg Spread
