@@ -233,30 +233,34 @@ def main():
         # Calculate Spread Series
         s_series = (data[target_exchange.lower()] - data[base_exchange.lower()]) / data[target_exchange.lower()] * 10000
         
-        # Calculate Percentiles (Whole Period)
-        qt_90 = s_series.quantile(0.90)
-        qt_50 = s_series.quantile(0.50)
-        qt_10 = s_series.quantile(0.10)
+        # Calculate Rolling Percentiles (Window = History Window)
+        # Using min_periods=1 to show expanding bands from start of data
+        window_str = f"{lookback}min"
+        qt_90 = s_series.rolling(window_str, min_periods=1).quantile(0.90)
+        qt_50 = s_series.rolling(window_str, min_periods=1).quantile(0.50)
+        qt_10 = s_series.rolling(window_str, min_periods=1).quantile(0.10)
 
+        # Chart 2: Relative Spread with Rolling Bands
         fig_spread = go.Figure()
         fig_spread.add_trace(go.Scatter(x=data.index, y=s_series, name="Spread (bps)", line=dict(color='green', width=1)))
         
-        # Add Benchmark Lines
-        fig_spread.add_hline(y=0, line_dash="solid", line_color="black", opacity=0.3)
+        # Overlay Rolling Bands
+        fig_spread.add_trace(go.Scatter(x=data.index, y=qt_90, name="90% Band", line=dict(color='orange', width=1, dash='dot')))
+        fig_spread.add_trace(go.Scatter(x=data.index, y=qt_50, name="Median Band", line=dict(color='blue', width=1, dash='dash')))
+        fig_spread.add_trace(go.Scatter(x=data.index, y=qt_10, name="10% Band", line=dict(color='orange', width=1, dash='dot')))
         
-        fig_spread.add_hline(y=qt_90, line_dash="dot", line_color="orange", annotation_text=f"90%: {qt_90:.1f}", annotation_position="top left")
-        fig_spread.add_hline(y=qt_50, line_dash="dash", line_color="blue", annotation_text=f"Median: {qt_50:.1f}", annotation_position="top left")
-        fig_spread.add_hline(y=qt_10, line_dash="dot", line_color="orange", annotation_text=f"10%: {qt_10:.1f}", annotation_position="bottom left")
-
-        fig_spread.update_layout(title="Relative Spread (bps) with Percentile Bands", height=250, margin=dict(l=0,r=0,t=30,b=0))
+        fig_spread.add_hline(y=0, line_dash="solid", line_color="black", opacity=0.3)
+        fig_spread.update_layout(title="Relative Spread (bps) vs Rolling Bands", height=250, margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig_spread, use_container_width=True)
         
-        # 3. Avg Spread
-        s_avg = s_series.rolling('10s').mean()
+        # Chart 3: Rolling Percentiles (Standalone)
         fig_avg = go.Figure()
-        fig_avg.add_trace(go.Scatter(x=data.index, y=s_avg, name="10s Avg Spread", line=dict(color='red', width=2)))
-        fig_avg.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig_avg.update_layout(title="10s Moving Average Spread (bps)", height=250, margin=dict(l=0,r=0,t=30,b=0))
+        fig_avg.add_trace(go.Scatter(x=data.index, y=qt_90, name="90% Quantile", line=dict(color='orange', width=2)))
+        fig_avg.add_trace(go.Scatter(x=data.index, y=qt_50, name="50% Quantile", line=dict(color='blue', width=2)))
+        fig_avg.add_trace(go.Scatter(x=data.index, y=qt_10, name="10% Quantile", line=dict(color='orange', width=2)))
+        
+        fig_avg.add_hline(y=0, line_dash="dash", line_color="black", opacity=0.5)
+        fig_avg.update_layout(title=f"Rolling {lookback}m Percentiles (bps)", height=250, margin=dict(l=0,r=0,t=30,b=0))
         st.plotly_chart(fig_avg, use_container_width=True)
 
     # Auto-rerun
