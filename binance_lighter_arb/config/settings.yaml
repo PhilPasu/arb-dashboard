@@ -1,0 +1,16 @@
+exchanges:
+  binance:
+    api_key: "YOUR_BINANCE_API_KEY"
+    api_secret: "YOUR_BINANCE_API_SECRET"
+    testnet: true
+  lighter:
+    private_key: "YOUR_ETHEREUM_PRIVATE_KEY"
+    api_url: "https://testnet.zklighter.elliot.ai"
+    web3_url: "https://sepolia-rollup.arbitrum.io/rpc"
+
+strategy:
+  symbol_binance: "ETHUSDC"
+  symbol_lighter: "ETH/USDC"
+  min_profit_pct: 0.001  # 0.1% minimum profit margin
+  binance_fee_pct: 0.001 # 0.1% maker fee (adjust if using BNB)
+  lighter_fee_pct: 0.0   # Taker fee on Lighter
