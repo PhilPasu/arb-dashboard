@@ -10,7 +10,7 @@ import csv
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 1. SETUP & CONFIGURATION
+# 1. SETUP & DIRECTORIES
 # ==============================================================================
 DATA_DIR = os.path.join(os.getcwd(), "data", "dashboard")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -20,22 +20,23 @@ PARADEX_API = "https://api.prod.paradex.trade/v1"
 BYBIT_API = "https://api.bybit.com"
 
 # ==============================================================================
-# 2. DATA FETCHER (Market ID 4 for BTC, 2048 for ETH)
+# 2. DATA COLLECTOR (MARKET ID 4: BTC, 2048: ETH)
 # ==============================================================================
 async def fetch_prices(coin="ETH"):
     prices = {'timestamp': datetime.now()}
     async with aiohttp.ClientSession() as session:
-        # Lighter
+        # Lighter Orderbook Price
         try:
             m_id = 4 if coin == "BTC" else 2048
-            async with session.get(f"{LIGHTER_API}/orderBookOrders", params={'market_id': m_id, 'limit': 1}) as r:
+            async with session.get(f"{LIGHTER_API}/orderBookOrders", params={'market_id': m_id, 'limit': 1}, timeout=5) as r:
                 data = await r.json()
-                ask = float(data['asks'][0][0] if isinstance(data['asks'][0], list) else data['asks'][0]['price'])
-                bid = float(data['bids'][0][0] if isinstance(data['bids'][0], list) else data['bids'][0]['price'])
-                prices['lighter'] = (ask + bid) / 2
+                # Parse asks/bids safely
+                def get_p(x): return float(x[0]) if isinstance(x, list) else float(x.get('price', 0))
+                ask, bid = get_p(data['asks'][0]), get_p(data['bids'][0])
+                if ask > 0 and bid > 0: prices['lighter'] = (ask + bid) / 2
         except: pass
 
-        # External Benchmark
+        # External Markets
         try:
             async with session.get(f"{PARADEX_API}/markets/summary", params={'market': f"{coin}-USD-PERP"}) as r:
                 p_data = await r.json()
@@ -77,72 +78,90 @@ def start_collector():
     c = DataCollector(); c.start(); return c
 
 # ==============================================================================
-# 3. DASHBOARD UI
+# 3. DASHBOARD MAIN APP
 # ==============================================================================
 def main():
-    st.set_page_config(page_title="ZkLighter Arb Terminal", layout="wide")
+    st.set_page_config(page_title="ZkLighter 7-Day Terminal", layout="wide")
     start_collector()
 
-    # --- Sidebar ---
-    st.sidebar.header("Monitor Settings")
+    # --- Sidebar Settings ---
+    st.sidebar.title("Terminal Config")
     coin = st.sidebar.selectbox("Asset", ["ETH", "BTC"])
     ex = st.sidebar.selectbox("Benchmark", ["Paradex", "Bybit", "Binance"])
     
-    # 7-day max = 10080 minutes
-    hist_m = st.sidebar.slider("Lookback (Minutes)", 5, 10080, 1440)
-    roll_m = st.sidebar.slider("Rolling Period (Minutes)", 1, 1440, 30)
+    # Time Sliders (7 Days = 10,080 minutes)
+    hist_m = st.sidebar.slider("Lookback Window (Minutes)", 5, 10080, 1440)
+    roll_m = st.sidebar.slider("Percentile Smoothing (Minutes)", 1, 1440, 30)
 
-    # --- Data Loading ---
+    # --- Data Processing ---
     path = os.path.join(DATA_DIR, f"history_{coin}.csv")
-    if not os.path.exists(path): return st.info("Collecting data...")
+    if not os.path.exists(path): return st.info("Starting Data Collector...")
     
     df = pd.read_csv(path)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df.set_index('timestamp', inplace=True)
     
-    # Forward-fill prices to prevent NaNs in calculations
+    # CRITICAL FIX: Ensure index is monotonic for rolling calculations
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep='last')] # Remove accidental duplicates
+
+    # Fill Price Gaps
     for col in ['lighter','paradex','bybit','binance']:
         df[col] = pd.to_numeric(df[col], errors='coerce').ffill()
     
-    # Spread Logic
+    # Math Calculations
     tgt = ex.lower()
     df['spread'] = (df[tgt] - df['lighter']) / df[tgt] * 10000
+    
+    # Rolling calculations (Monotonic index required here)
     df['q90'] = df['spread'].rolling(f"{roll_m}min").quantile(0.90)
     df['q50'] = df['spread'].rolling(f"{roll_m}min").quantile(0.50)
     df['q10'] = df['spread'].rolling(f"{roll_m}min").quantile(0.10)
     
-    # Filter the view
+    # Filter for the view window
     view = df[df.index >= (datetime.now() - timedelta(minutes=hist_m))].copy()
 
     if not view.empty:
+        curr = view.iloc[-1]
+        
+        # Header Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Lighter Price", f"${curr['lighter']:,.2f}")
+        col2.metric(f"{ex} Price", f"${curr[tgt]:,.2f}")
+        col3.metric("Live Spread", f"{curr['spread']:.2f} bps")
+
         # 1. Price Plot
         fig_p = go.Figure()
         fig_p.add_trace(go.Scatter(x=view.index, y=view[tgt], name=ex, line=dict(color='#00FFAA')))
         fig_p.add_trace(go.Scatter(x=view.index, y=view['lighter'], name="Lighter", line=dict(color='#FF00FF')))
-        fig_p.update_layout(title=f"{coin} Prices", height=300, template="plotly_dark")
+        fig_p.update_layout(title=f"{coin} Price Overlay", height=300, template="plotly_dark")
         st.plotly_chart(fig_p, use_container_width=True)
 
-        # 2. Spread Plot (FIXED: Solid White + Connect Gaps)
+        # 2. Spread Plot (Clean White Line ONLY)
         fig_s = go.Figure()
         fig_s.add_trace(go.Scatter(
             x=view.index, 
-            y=view['spread'].ffill(), 
-            mode='lines',
+            y=view['spread'].ffill(), # Fill NaNs to prevent line breaking
             name="Spread (bps)", 
-            line=dict(color='#FFFFFF', width=2.5), 
-            connectgaps=True # This ensures the line doesn't disappear if there's a gap
+            mode='lines',
+            line=dict(color='#FFFFFF', width=2.5), # SOLID WHITE
+            connectgaps=True # Bridge any missing API data
         ))
-        fig_s.update_layout(title="Arb Spread (BPS)", height=350, template="plotly_dark")
+        fig_s.update_layout(title="Arbitrage Spread (Basis Points)", height=350, template="plotly_dark")
         st.plotly_chart(fig_s, use_container_width=True)
 
-        # 3. Statistical Corridor
+        # 3. Percentiles Plot (Separated)
         fig_stat = go.Figure()
-        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(color='#FF4B4B')))
+        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th Pctl", line=dict(color='#FF4B4B', dash='dot')))
         fig_stat.add_trace(go.Scatter(x=view.index, y=view['q50'], name="Median", line=dict(color='#00D4FF')))
-        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700')))
-        fig_stat.update_layout(title="Percentile Bands", height=250, template="plotly_dark")
+        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th Pctl", line=dict(color='#FFD700', dash='dot')))
+        fig_stat.add_hline(y=0, line_dash="dash", line_color="white", opacity=0.3)
+        fig_stat.update_layout(title="Historical Statistical Bands", height=250, template="plotly_dark")
         st.plotly_chart(fig_stat, use_container_width=True)
 
-    time.sleep(2); st.rerun()
+    # 2-second refresh
+    time.sleep(2)
+    st.rerun()
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
