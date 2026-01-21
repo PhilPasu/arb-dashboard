@@ -91,7 +91,6 @@ def main():
     roll_m = st.sidebar.slider("Stats Period (Minutes)", 1, 1440, 30)
 
     st.sidebar.subheader("Display Options")
-    # THE TICK BOXES YOU ASKED FOR:
     show_90 = st.sidebar.checkbox("Show 90th Percentile", value=True)
     show_50 = st.sidebar.checkbox("Show Median (50th)", value=True)
     show_10 = st.sidebar.checkbox("Show 10th Percentile", value=True)
@@ -115,6 +114,9 @@ def main():
     df['spread'] = (df[tgt] - df['lighter']) / df[tgt] * 10000
     
     # Filter the window
+    if df.empty:
+        return st.warning("No data found in CSV.")
+        
     last_entry = df.index[-1]
     view = df[df.index >= (last_entry - timedelta(minutes=hist_m))].copy()
 
@@ -128,10 +130,10 @@ def main():
         fig_p = go.Figure()
         fig_p.add_trace(go.Scatter(x=view.index, y=view[tgt], name=ex, line=dict(color='#00FFAA')))
         fig_p.add_trace(go.Scatter(x=view.index, y=view['lighter'], name="Lighter", line=dict(color='#FF00FF')))
-        fig_p.update_layout(title=f"{coin} Price Overlay", height=300)
+        fig_p.update_layout(title=f"{coin} Price Overlay", height=300, margin=dict(t=40, b=20))
         st.plotly_chart(fig_p, use_container_width=True)
 
-        # 2. Spread Plot (High contrast Red)
+        # 2. Spread Plot (Line Chart)
         fig_s = go.Figure()
         fig_s.add_trace(go.Scatter(
             x=view.index, 
@@ -141,8 +143,32 @@ def main():
             line=dict(color='#FF4B4B', width=2),
             connectgaps=True
         ))
-        fig_s.update_layout(title="Arbitrage Spread (Basis Points)", height=350)
+        fig_s.update_layout(title="Arbitrage Spread (Basis Points)", height=350, margin=dict(t=40, b=20))
         st.plotly_chart(fig_s, use_container_width=True)
+
+        # --- 2.5 HISTOGRAM (NEW) ---
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Histogram(
+            x=view['spread'].dropna(),
+            nbinsx=80,
+            marker_color='#FF4B4B',
+            opacity=0.6,
+            name="Spread Distribution"
+        ))
+        
+        # Add a vertical line for the current (latest) spread
+        cur_spread = view['spread'].iloc[-1]
+        fig_hist.add_vline(x=cur_spread, line_width=2, line_dash="dash", line_color="white")
+        fig_hist.add_annotation(x=cur_spread, text="Current", showarrow=True, arrowhead=1)
+
+        fig_hist.update_layout(
+            title=f"Spread Distribution Density (Last {hist_m}m)",
+            xaxis_title="Basis Points (bps)",
+            yaxis_title="Frequency",
+            height=300,
+            bargap=0.1
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
 
         # 3. Statistical Corridor (CONTROLLED BY TICK BOXES)
         fig_stat = go.Figure()
@@ -153,7 +179,7 @@ def main():
         if show_10:
             fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700', dash='dot')))
         
-        fig_stat.update_layout(title="Historical corridor", height=250)
+        fig_stat.update_layout(title="Historical corridor", height=250, margin=dict(t=40, b=20))
         st.plotly_chart(fig_stat, use_container_width=True)
 
     time.sleep(2)
