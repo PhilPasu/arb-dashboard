@@ -10,7 +10,7 @@ import csv
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# SETUP & CONFIG
+# 1. SETUP & CONFIG
 # ==============================================================================
 DATA_DIR = os.path.join(os.getcwd(), "data", "dashboard")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -20,7 +20,7 @@ PARADEX_API = "https://api.prod.paradex.trade/v1"
 BYBIT_API = "https://api.bybit.com"
 
 # ==============================================================================
-# DATA COLLECTOR
+# 2. DATA COLLECTOR (MARKET ID 4: BTC, 2048: ETH)
 # ==============================================================================
 async def fetch_prices(coin="ETH"):
     prices = {'timestamp': datetime.now()}
@@ -75,24 +75,36 @@ def start_collector():
     c = DataCollector(); c.start(); return c
 
 # ==============================================================================
-# MAIN DASHBOARD
+# 3. MAIN DASHBOARD
 # ==============================================================================
 def main():
     st.set_page_config(page_title="ZkLighter Arb Terminal", layout="wide")
     start_collector()
 
-    st.sidebar.title("Configuration")
+    # --- SIDEBAR CONFIG ---
+    st.sidebar.title("Terminal Config")
     coin = st.sidebar.selectbox("Asset", ["ETH", "BTC"])
     ex = st.sidebar.selectbox("Benchmark", ["Paradex", "Bybit", "Binance"])
+    
+    st.sidebar.subheader("Time Window")
     hist_m = st.sidebar.slider("Lookback (Minutes)", 5, 10080, 1440)
-    roll_m = st.sidebar.slider("Stats Window (Minutes)", 1, 1440, 30)
+    roll_m = st.sidebar.slider("Stats Period (Minutes)", 1, 1440, 30)
 
+    st.sidebar.subheader("Display Options")
+    # THE TICK BOXES YOU ASKED FOR:
+    show_90 = st.sidebar.checkbox("Show 90th Percentile", value=True)
+    show_50 = st.sidebar.checkbox("Show Median (50th)", value=True)
+    show_10 = st.sidebar.checkbox("Show 10th Percentile", value=True)
+
+    # --- DATA PROCESSING ---
     path = os.path.join(DATA_DIR, f"history_{coin}.csv")
     if not os.path.exists(path): return st.info("Initializing historical data...")
     
     df = pd.read_csv(path)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df.set_index('timestamp', inplace=True)
+    
+    # Critical Fixes for Gaps/Sorting
     df = df.sort_index()
     df = df[~df.index.duplicated(keep='last')]
 
@@ -101,23 +113,17 @@ def main():
     
     tgt = ex.lower()
     df['spread'] = (df[tgt] - df['lighter']) / df[tgt] * 10000
-    df['q90'] = df['spread'].rolling(f"{roll_m}min").quantile(0.90)
-    df['q50'] = df['spread'].rolling(f"{roll_m}min").quantile(0.50)
-    df['q10'] = df['spread'].rolling(f"{roll_m}min").quantile(0.10)
     
-    # Logic to handle potential timezone shifts
+    # Filter the window
     last_entry = df.index[-1]
     view = df[df.index >= (last_entry - timedelta(minutes=hist_m))].copy()
 
-    if not view.empty:
-        curr = view.iloc[-1]
-        
-        # Connection Status
-        time_diff = (datetime.now() - last_entry).total_seconds()
-        status_color = "green" if time_diff < 10 else "red"
-        st.sidebar.markdown(f"Status: :{status_color}[{'● LIVE' if status_color == 'green' else '● STALE'}]")
-        st.sidebar.caption(f"Last update: {last_entry.strftime('%H:%M:%S')}")
+    # Calculate percentiles on the filtered view
+    view['q90'] = view['spread'].rolling(f"{roll_m}min").quantile(0.90)
+    view['q50'] = view['spread'].rolling(f"{roll_m}min").quantile(0.50)
+    view['q10'] = view['spread'].rolling(f"{roll_m}min").quantile(0.10)
 
+    if not view.empty:
         # 1. Price Plot
         fig_p = go.Figure()
         fig_p.add_trace(go.Scatter(x=view.index, y=view[tgt], name=ex, line=dict(color='#00FFAA')))
@@ -125,28 +131,33 @@ def main():
         fig_p.update_layout(title=f"{coin} Price Overlay", height=300)
         st.plotly_chart(fig_p, use_container_width=True)
 
-        # 2. Spread Plot (FIXED: High contrast color for light mode)
+        # 2. Spread Plot (High contrast Red)
         fig_s = go.Figure()
         fig_s.add_trace(go.Scatter(
             x=view.index, 
             y=view['spread'].ffill(), 
             mode='lines',
             name="Spread (bps)", 
-            line=dict(color='#FF4B4B', width=2), # RED is visible on all themes
+            line=dict(color='#FF4B4B', width=2),
             connectgaps=True
         ))
         fig_s.update_layout(title="Arbitrage Spread (Basis Points)", height=350)
         st.plotly_chart(fig_s, use_container_width=True)
 
-        # 3. Statistical Corridor
+        # 3. Statistical Corridor (CONTROLLED BY TICK BOXES)
         fig_stat = go.Figure()
-        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(color='#FF4B4B', dash='dot')))
-        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q50'], name="Median", line=dict(color='#00D4FF')))
-        fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700', dash='dot')))
-        fig_stat.update_layout(title="Percentile Corridor", height=250)
+        if show_90:
+            fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(color='#FF4B4B', dash='dot')))
+        if show_50:
+            fig_stat.add_trace(go.Scatter(x=view.index, y=view['q50'], name="Median", line=dict(color='#00D4FF')))
+        if show_10:
+            fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700', dash='dot')))
+        
+        fig_stat.update_layout(title="Historical corridor", height=250)
         st.plotly_chart(fig_stat, use_container_width=True)
 
     time.sleep(2)
     st.rerun()
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
