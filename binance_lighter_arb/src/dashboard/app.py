@@ -7,10 +7,10 @@ import threading
 import time
 import os
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ==============================================================================
-# Configuration & Constants
+# Setup & Directories
 # ==============================================================================
 DATA_DIR = os.path.join(os.getcwd(), "data", "dashboard")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -21,21 +21,19 @@ PARADEX_MAINNET_API = "https://api.prod.paradex.trade/v1"
 BYBIT_MAINNET_API = "https://api.bybit.com"
 
 # ==============================================================================
-# 1. Robust Data Fetcher
+# 1. Background Data Collector
 # ==============================================================================
 async def fetch_json(session, url, params=None):
     try:
-        headers = {"User-Agent": "ArbDashboard/1.3"}
-        async with session.get(url, params=params, headers=headers, timeout=5) as resp:
-            if resp.status == 200:
-                return await resp.json()
+        async with session.get(url, params=params, timeout=5) as resp:
+            if resp.status == 200: return await resp.json()
     except: pass
     return None
 
 async def fetch_prices(coin="ETH"):
     prices = {'timestamp': datetime.now()}
     async with aiohttp.ClientSession() as session:
-        # Lighter (BTC: 4, ETH: 2048)
+        # Lighter (BTC Market ID: 4, ETH Market ID: 2048)
         try:
             m_id = 4 if coin == "BTC" else 2048
             url = f"{LIGHTER_MAINNET_API}{LIGHTER_API_VERSION}/orderBookOrders"
@@ -46,7 +44,7 @@ async def fetch_prices(coin="ETH"):
                 if ask > 0 and bid > 0: prices['lighter'] = (ask + bid) / 2
         except: pass
 
-        # Others
+        # External Markets
         try:
             p_data = await fetch_json(session, f"{PARADEX_MAINNET_API}/markets/summary", {'market': f"{coin}-USD-PERP"})
             if p_data: prices['paradex'] = float(p_data['results'][0]['last_traded_price'])
@@ -59,9 +57,6 @@ async def fetch_prices(coin="ETH"):
         except: pass
     return prices
 
-# ==============================================================================
-# 2. Collector Thread
-# ==============================================================================
 class DataCollector(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
@@ -81,82 +76,86 @@ class DataCollector(threading.Thread):
                     with open(self.files[coin], 'a', newline='') as f:
                         csv.writer(f).writerow([p['timestamp'], p.get('lighter',''), p.get('paradex',''), p.get('bybit',''), p.get('binance','')])
                 except: pass
-            time.sleep(1.5)
+            time.sleep(2.0)
 
 @st.cache_resource
 def start_collector():
     c = DataCollector(); c.start(); return c
 
 # ==============================================================================
-# 3. Streamlit Dashboard
+# 2. Main Dashboard App
 # ==============================================================================
 def main():
-    st.set_page_config(page_title="Arb Pro", layout="wide")
+    st.set_page_config(page_title="ZkLighter 7-Day Monitor", layout="wide")
     start_collector()
 
     # --- SIDEBAR ---
-    st.sidebar.header("Settings")
+    st.sidebar.title("Config")
     coin = st.sidebar.selectbox("Asset", ["ETH", "BTC"])
-    ex = st.sidebar.selectbox("Exchange", ["Paradex", "Bybit", "Binance"])
-    hist_m = st.sidebar.slider("View (Min)", 5, 120, 30)
-    roll_m = st.sidebar.slider("Stats (Min)", 1, 120, 15)
+    ex = st.sidebar.selectbox("Benchmark", ["Paradex", "Bybit", "Binance"])
     
-    st.sidebar.subheader("Percentile Toggles")
-    s90 = st.sidebar.checkbox("Show 90th", True)
-    s50 = st.sidebar.checkbox("Show 50th", True)
-    s10 = st.sidebar.checkbox("Show 10th", True)
+    # 7-day View Window
+    hist_m = st.sidebar.slider("View Window (Mins)", 5, 10080, 1440)
+    roll_m = st.sidebar.slider("Stats Window (Mins)", 1, 1440, 30)
+    
+    st.sidebar.divider()
+    st.sidebar.subheader("Percentile Plot Toggles")
+    s90 = st.sidebar.checkbox("90th Percentile", True)
+    s50 = st.sidebar.checkbox("Median", True)
+    s10 = st.sidebar.checkbox("10th Percentile", True)
 
-    # --- DATA ---
+    # --- DATA PROCESSING ---
     path = os.path.join(DATA_DIR, f"history_{coin}.csv")
-    if not os.path.exists(path): return st.info("Loading...")
+    if not os.path.exists(path): return st.info("Initializing...")
     
     df = pd.read_csv(path)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df.set_index('timestamp', inplace=True)
     df.sort_index(inplace=True)
-    for col in ['lighter','paradex','bybit','binance']: df[col] = pd.to_numeric(df[col], errors='coerce')
+    for col in ['lighter','paradex','bybit','binance']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').ffill()
     
-    # Calc Stats
     tgt = ex.lower()
     df['spread'] = (df[tgt] - df['lighter']) / df[tgt] * 10000
     df['q90'] = df['spread'].rolling(f"{roll_m}min").quantile(0.90)
     df['q50'] = df['spread'].rolling(f"{roll_m}min").quantile(0.50)
     df['q10'] = df['spread'].rolling(f"{roll_m}min").quantile(0.10)
     
-    view = df[df.index >= (datetime.now() - pd.Timedelta(minutes=hist_m))].copy()
+    view = df[df.index >= (datetime.now() - timedelta(minutes=hist_m))].copy()
 
     if not view.empty:
-        # Metrics
         curr = view.iloc[-1]
         c1, c2, c3 = st.columns(3)
-        c1.metric(f"Lighter {coin}", f"${curr['lighter']:,.2f}")
-        c2.metric(f"{ex} {coin}", f"${curr[tgt]:,.2f}")
-        c3.metric("Live Spread", f"{curr['spread']:.2f} bps")
+        c1.metric("Lighter", f"${curr['lighter']:,.2f}")
+        c2.metric(ex, f"${curr[tgt]:,.2f}")
+        c3.metric("Spread", f"{curr['spread']:.2f} bps")
 
-        # 1. RESTORED PRICE PLOT
+        # 1. Price Overlay
         fig_p = go.Figure()
-        fig_p.add_trace(go.Scatter(x=view.index, y=view[tgt], name=ex, line=dict(color='#A020F0')))
-        fig_p.add_trace(go.Scatter(x=view.index, y=view['lighter'], name="Lighter", line=dict(color='#00BFFF')))
-        fig_p.update_layout(title=f"{coin} Price Action", height=300, template="plotly_dark")
+        fig_p.add_trace(go.Scatter(x=view.index, y=view[tgt], name=ex, line=dict(color='#00FFAA', width=2)))
+        fig_p.add_trace(go.Scatter(x=view.index, y=view['lighter'], name="Lighter", line=dict(color='#FF00FF', width=2)))
+        fig_p.update_layout(title=f"{coin} Price Action", height=350, template="plotly_dark")
         st.plotly_chart(fig_p, use_container_width=True)
 
-        # 2. SPREAD PLOT
+        # 2. Spread ONLY Plot (Solid White Line)
         fig_s = go.Figure()
-        fig_s.add_trace(go.Scatter(x=view.index, y=view['spread'], name="Spread", line=dict(color='white')))
-        if s90: fig_s.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(dash='dot', color='red')))
-        if s50: fig_s.add_trace(go.Scatter(x=view_df.index if 'view_df' in locals() else view.index, y=view['q50'], name="Median", line=dict(dash='dash', color='cyan')))
-        if s10: fig_s.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(dash='dot', color='orange')))
-        fig_s.update_layout(title="Spread with Overlay Bands", height=300, template="plotly_dark")
+        fig_s.add_trace(go.Scatter(
+            x=view.index, y=view['spread'], 
+            name="Spread (bps)", 
+            line=dict(color='#FFFFFF', width=2.5) # Solid Bright White
+        ))
+        fig_s.update_layout(title="Arbitrage Spread (Basis Points)", height=350, template="plotly_dark")
         st.plotly_chart(fig_s, use_container_width=True)
 
-        # 3. PURE STATS PLOT
+        # 3. Percentiles ONLY Plot
         fig_stat = go.Figure()
-        if s90: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90%", line=dict(color='red')))
-        if s50: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q50'], name="50%", line=dict(color='cyan')))
-        if s10: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10%", line=dict(color='orange')))
-        fig_stat.update_layout(title=f"Rolling {roll_m}m Statistical Distribution", height=250, template="plotly_dark")
+        if s90: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(color='#FF4B4B')))
+        if s50: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q50'], name="Median", line=dict(color='#00D4FF')))
+        if s10: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700')))
+        fig_stat.add_hline(y=0, line_width=1, line_color="#FFFFFF", opacity=0.3)
+        fig_stat.update_layout(title="Statistical Corridor", height=250, template="plotly_dark")
         st.plotly_chart(fig_stat, use_container_width=True)
 
-    time.sleep(1); st.rerun()
+    time.sleep(2); st.rerun()
 
 if __name__ == "__main__": main()
