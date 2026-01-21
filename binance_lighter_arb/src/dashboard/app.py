@@ -10,79 +10,78 @@ import csv
 from datetime import datetime, timedelta
 
 # ==============================================================================
-# 1. ROBUST PATH & CONFIG
+# 1. PATH & CONFIG (Resilient Setup)
 # ==============================================================================
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Shared state to track API health across threads
-if 'api_health' not in st.session_state:
-    st.session_state.api_health = {}
+# We use a global dict for health because background threads can't write to st.session_state
+API_STATUS = {"Lighter": "⏳", "Paradex": "⏳", "Bybit": "⏳", "Binance": "⏳"}
 
 # ==============================================================================
-# 2. THE RESTORED DATA COLLECTOR
+# 2. DATA COLLECTOR (Enhanced Robustness)
 # ==============================================================================
-async def fetch_all_prices(coin="ETH"):
-    """Fetches from all 4 sources with strict parsing."""
-    results = {'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    health = {}
+async def fetch_prices_robust(coin="ETH"):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    prices = {'timestamp': now}
     
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
+    # Headers to look like a browser (helps with Bybit/Binance blocks)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     
     async with aiohttp.ClientSession(headers=headers) as session:
-        # 1. PARADEX (The one that works)
+        # 1. PARADEX (Market Summary)
         try:
             url = f"https://api.prod.paradex.trade/v1/markets/summary?market={coin}-USD-PERP"
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
-                    data = await r.json()
-                    results['paradex'] = float(data['results'][0]['last_traded_price'])
-                    health['Paradex'] = "🟢"
-                else: health['Paradex'] = f"🔴 {r.status}"
-        except Exception as e: health['Paradex'] = f"❌ Error"
+                    d = await r.json()
+                    prices['paradex'] = float(d['results'][0]['last_traded_price'])
+                    API_STATUS['Paradex'] = "🟢"
+                else: API_STATUS['Paradex'] = f"🔴 {r.status}"
+        except: API_STATUS['Paradex'] = "❌ Err"
 
-        # 2. BINANCE (FUTURES)
+        # 2. BINANCE FUTURES (Price Ticker)
         try:
             url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={coin}USDT"
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
-                    data = await r.json()
-                    results['binance'] = float(data['price'])
-                    health['Binance'] = "🟢"
-                else: health['Binance'] = f"🔴 {r.status}"
-        except Exception: health['Binance'] = "❌ Error"
+                    d = await r.json()
+                    prices['binance'] = float(d['price'])
+                    API_STATUS['Binance'] = "🟢"
+                else: API_STATUS['Binance'] = f"🔴 {r.status}"
+        except: API_STATUS['Binance'] = "❌ Err"
 
-        # 3. BYBIT (V5)
+        # 3. BYBIT V5 (Tickers)
         try:
             url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={coin}USDT"
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
-                    data = await r.json()
-                    results['bybit'] = float(data['result']['list'][0]['lastPrice'])
-                    health['Bybit'] = "🟢"
-                else: health['Bybit'] = f"🔴 {r.status}"
-        except Exception: health['Bybit'] = "❌ Error"
+                    d = await r.json()
+                    prices['bybit'] = float(d['result']['list'][0]['lastPrice'])
+                    API_STATUS['Bybit'] = "🟢"
+                else: API_STATUS['Bybit'] = f"🔴 {r.status}"
+        except: API_STATUS['Bybit'] = "❌ Err"
 
-        # 4. ZKLIGHTER
+        # 4. ZKLIGHTER (Orderbook)
         try:
             m_id = 4 if coin == "BTC" else 2048
             url = f"https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id={m_id}&limit=1"
             async with session.get(url, timeout=5) as r:
                 if r.status == 200:
-                    data = await r.json()
-                    # Check structure: data['asks'] is list of [price, size]
-                    if data.get('asks') and data.get('bids'):
-                        ask = float(data['asks'][0][0])
-                        bid = float(data['bids'][0][0])
-                        results['lighter'] = (ask + bid) / 2
-                        health['Lighter'] = "🟢"
-                    else: health['Lighter'] = "🟡 Empty Book"
-                else: health['Lighter'] = f"🔴 {r.status}"
-        except Exception: health['Lighter'] = "❌ Error"
+                    d = await r.json()
+                    if d.get('asks') and d.get('bids'):
+                        # ZkLighter returns price in first element of each level list
+                        prices['lighter'] = (float(d['asks'][0][0]) + float(d['bids'][0][0])) / 2
+                        API_STATUS['Lighter'] = "🟢"
+                    else: API_STATUS['Lighter'] = "🟡 Empty"
+                else: API_STATUS['Lighter'] = f"🔴 {r.status}"
+        except: API_STATUS['Lighter'] = "❌ Err"
 
-    return results, health
+    return prices
 
-class MasterCollector(threading.Thread):
+class ArbWorker(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.coins = ["ETH", "BTC"]
@@ -92,122 +91,119 @@ class MasterCollector(threading.Thread):
         while True:
             for coin in self.coins:
                 try:
-                    res, health = loop.run_until_complete(fetch_all_prices(coin))
-                    path = os.path.join(DATA_DIR, f"db_{coin}.csv")
-                    
-                    # Ensure CSV exists
+                    p = loop.run_until_complete(fetch_prices_robust(coin))
+                    path = os.path.join(DATA_DIR, f"arb_{coin}.csv")
+                    # Init file
                     if not os.path.exists(path):
                         with open(path, 'w', newline='') as f:
                             csv.writer(f).writerow(['timestamp','lighter','paradex','bybit','binance'])
-                    
-                    # Write only if we have new data
-                    if len(res) > 1:
+                    # Append row
+                    if len(p) > 1:
                         with open(path, 'a', newline='') as f:
-                            csv.writer(f).writerow([res['timestamp'], res.get('lighter',''), res.get('paradex',''), res.get('bybit',''), res.get('binance','')])
-                    
-                    # Update status for UI
-                    st.session_state.api_health = health
+                            csv.writer(f).writerow([p['timestamp'], p.get('lighter',''), p.get('paradex',''), p.get('bybit',''), p.get('binance','')])
                 except: pass
             time.sleep(2)
 
 @st.cache_resource
-def init_worker():
-    worker = MasterCollector()
-    worker.start()
-    return worker
+def start_worker():
+    w = ArbWorker(); w.start(); return w
 
 # ==============================================================================
-# 3. STATIC-FEEL UI (FRAGMENT)
+# 3. FRAGMENT UI (No-Blink Updates)
 # ==============================================================================
 @st.fragment(run_every=2.0)
-def render_live_ui(coin, benchmark, lookback, roll_m, s90, s50, s10):
-    path = os.path.join(DATA_DIR, f"db_{coin}.csv")
+def render_plots(coin, bench, lookback, stats_period, s90, s50, s10):
+    path = os.path.join(DATA_DIR, f"arb_{coin}.csv")
     if not os.path.exists(path):
-        st.info("Searching for data...")
+        st.info("⌛ Gathering market data...")
         return
 
-    try:
-        df = pd.read_csv(path).tail(2000) # Keep memory light
-        if df.empty: return
+    df = pd.read_csv(path)
+    if df.empty: return
 
-        # Transform
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.set_index('timestamp').sort_index()
-        df = df[~df.index.duplicated(keep='last')]
-        for c in ['lighter','paradex','bybit','binance']:
-            df[c] = pd.to_numeric(df[c], errors='coerce').ffill()
+    # Cleaning & Processing
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.set_index('timestamp').sort_index()
+    df = df[~df.index.duplicated(keep='last')]
+    for c in ['lighter','paradex','bybit','binance']:
+        df[c] = pd.to_numeric(df[c], errors='coerce').ffill()
 
-        # Calculate Spread
-        tgt = benchmark.lower()
-        df['spread'] = (df[tgt] - df['lighter']) / df[tgt] * 10000
-        
-        # Windowing
-        view = df[df.index >= (df.index[-1] - timedelta(minutes=lookback))].copy()
-        view['q90'] = view['spread'].rolling(f"{roll_m}min").quantile(0.90)
-        view['q50'] = view['spread'].rolling(f"{roll_m}min").quantile(0.50)
-        view['q10'] = view['spread'].rolling(f"{roll_m}min").quantile(0.10)
+    # Arb Calculation
+    target_col = bench.lower()
+    df['spread'] = (df[target_col] - df['lighter']) / df[target_col] * 10000
+    
+    # Filtering for Window
+    view = df[df.index >= (df.index[-1] - timedelta(minutes=lookback))].copy()
+    if view.empty: return
 
-        # PLOTS
-        config = {'displayModeBar': False}
+    # Percentiles
+    view['q90'] = view['spread'].rolling(f"{stats_period}min").quantile(0.90)
+    view['q50'] = view['spread'].rolling(f"{stats_period}min").quantile(0.50)
+    view['q10'] = view['spread'].rolling(f"{stats_period}min").quantile(0.10)
 
-        # Plot 1: Price
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=view.index, y=view[tgt], name=benchmark, line=dict(color='#00FFAA')))
-        fig1.add_trace(go.Scatter(x=view.index, y=view['lighter'], name="Lighter", line=dict(color='#FF00FF')))
-        fig1.update_layout(title="Live Price Overlay", height=300, template="plotly_dark", margin=dict(t=30,b=10))
-        st.plotly_chart(fig1, use_container_width=True, config=config, key="f1")
+    # UI Configuration
+    p_cfg = {'displayModeBar': False}
 
-        # Plot 2: Spread
-        fig2 = go.Figure(go.Scatter(x=view.index, y=view['spread'], name="Spread", line=dict(color='#FF4B4B')))
-        fig2.update_layout(title="Arbitrage Spread (Basis Points)", height=300, template="plotly_dark")
-        st.plotly_chart(fig2, use_container_width=True, config=config, key="f2")
+    # 1. Price Overlay
+    fig_p = go.Figure()
+    fig_p.add_trace(go.Scatter(x=view.index, y=view[target_col], name=bench, line=dict(color='#00FFAA')))
+    fig_p.add_trace(go.Scatter(x=view.index, y=view['lighter'], name="Lighter", line=dict(color='#FF00FF')))
+    fig_p.update_layout(title="Live Price Feed", height=300, template="plotly_dark", margin=dict(t=30,b=10))
+    st.plotly_chart(fig_p, use_container_width=True, config=p_cfg, key="p_v")
 
-        # Plot 3: Stats Corridor
-        fig3 = go.Figure()
-        if s90: fig3.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(color='#FF4B4B', dash='dot')))
-        if s50: fig3.add_trace(go.Scatter(x=view.index, y=view['q50'], name="Median", line=dict(color='#00D4FF')))
-        if s10: fig3.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700', dash='dot')))
-        fig3.update_layout(title="Volatility Corridor", height=250, template="plotly_dark")
-        st.plotly_chart(fig3, use_container_width=True, config=config, key="f3")
+    # 2. Spread Line
+    fig_s = go.Figure(go.Scatter(x=view.index, y=view['spread'], name="Spread", line=dict(color='#FF4B4B')))
+    fig_s.update_layout(title="Arb Spread (Basis Points)", height=300, template="plotly_dark")
+    st.plotly_chart(fig_s, use_container_width=True, config=p_cfg, key="s_v")
 
-        # Plot 4: Median Distribution (REQUESTED)
-        fig4 = go.Figure(go.Histogram(x=view['q50'].dropna(), nbinsx=50, marker_color='#00D4FF', opacity=0.7))
-        fig4.update_layout(title="Median Spread Distribution (Frequency)", height=250, template="plotly_dark", bargap=0.1)
-        st.plotly_chart(fig4, use_container_width=True, config=config, key="f4")
+    # 3. Spread Probability Histogram
+    fig_h1 = go.Figure(go.Histogram(x=view['spread'].dropna(), nbinsx=60, marker_color='#FF4B4B', opacity=0.7))
+    fig_h1.update_layout(title="Spread Occurrence Density", height=250, template="plotly_dark", bargap=0.05)
+    st.plotly_chart(fig_h1, use_container_width=True, config=p_cfg, key="h1_v")
 
-    except Exception as e:
-        st.error(f"UI Error: {e}")
+    # 4. Volatility Corridor
+    fig_stat = go.Figure()
+    if s90: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q90'], name="90th", line=dict(color='#FF4B4B', dash='dot')))
+    if s50: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q50'], name="Median", line=dict(color='#00D4FF')))
+    if s10: fig_stat.add_trace(go.Scatter(x=view.index, y=view['q10'], name="10th", line=dict(color='#FFD700', dash='dot')))
+    fig_stat.update_layout(title="Market Percentile Corridor", height=250, template="plotly_dark")
+    st.plotly_chart(fig_stat, use_container_width=True, config=p_cfg, key="c_v")
+
+    # 5. MEDIAN DISTRIBUTION (REQUESTED)
+    fig_h2 = go.Figure(go.Histogram(x=view['q50'].dropna(), nbinsx=60, marker_color='#00D4FF', opacity=0.7))
+    fig_h2.update_layout(title=f"Distribution of {stats_period}m Rolling Median", height=250, template="plotly_dark", bargap=0.05)
+    st.plotly_chart(fig_h2, use_container_width=True, config=p_cfg, key="h2_v")
 
 # ==============================================================================
-# 4. MAIN TERMINAL
+# 4. MAIN PAGE
 # ==============================================================================
 def main():
-    st.set_page_config(page_title="ZkLighter Arb", layout="wide")
-    init_worker()
+    st.set_page_config(page_title="ZkLighter Arb Terminal", layout="wide")
+    start_worker()
 
-    # SIDEBAR DIAGNOSTICS
-    st.sidebar.title("Terminal Config")
+    st.sidebar.title("⚡ Settings")
     
-    with st.sidebar.expander("API Health Monitor", expanded=True):
-        if st.session_state.api_health:
-            for api, status in st.session_state.api_health.items():
-                st.write(f"{status} {api}")
-        else:
-            st.write("⌛ Starting collector...")
+    # LIVE API STATUS MONITOR
+    st.sidebar.markdown("### API Health")
+    status_cols = st.sidebar.columns(4)
+    status_cols[0].write(f"LGT:{API_STATUS['Lighter']}")
+    status_cols[1].write(f"PDX:{API_STATUS['Paradex']}")
+    status_cols[2].write(f"BYB:{API_STATUS['Bybit']}")
+    status_cols[3].write(f"BIN:{API_STATUS['Binance']}")
 
     coin = st.sidebar.selectbox("Asset", ["ETH", "BTC"])
-    benchmark = st.sidebar.selectbox("Benchmark", ["Paradex", "Bybit", "Binance"])
+    bench = st.sidebar.selectbox("Benchmark", ["Paradex", "Bybit", "Binance"])
     
     st.sidebar.divider()
     lookback = st.sidebar.slider("Lookback (Mins)", 5, 1440, 60)
-    roll_m = st.sidebar.slider("Stats Window (Mins)", 1, 120, 30)
+    stats_period = st.sidebar.slider("Stats Window (Mins)", 1, 120, 30)
     
-    s90 = st.sidebar.checkbox("90th Percentile", True)
+    st.sidebar.subheader("Percentiles")
+    s90 = st.sidebar.checkbox("90th", True)
     s50 = st.sidebar.checkbox("Median", True)
-    s10 = st.sidebar.checkbox("10th Percentile", True)
+    s10 = st.sidebar.checkbox("10th", True)
 
-    # RE-RENDER THE FRAGMENT
-    render_live_ui(coin, benchmark, lookback, roll_m, s90, s50, s10)
+    render_plots(coin, bench, lookback, stats_period, s90, s50, s10)
 
 if __name__ == "__main__":
     main()
